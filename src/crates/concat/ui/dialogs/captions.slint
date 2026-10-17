@@ -39,6 +39,8 @@ export struct CaptionsSheetData {
     placement: int,
     /// 0 Small, 1 Medium, 2 Large
     size: int,
+    /// 0 Phrase, 1 Line (~4 words), 2 Word — CapCut-style packing.
+    cadence: int,
     running: bool,
     /// 0..1: where the transcription surely is.
     progress: float,
@@ -68,6 +70,7 @@ export component CaptionsDialog inherits Modal {
     callback model-changed(index: int);
     callback placement-changed(index: int);
     callback size-changed(index: int);
+    callback cadence-changed(index: int);
     callback begin();
     callback cancel();
 
@@ -227,10 +230,31 @@ export component CaptionsDialog inherits Modal {
                 }
             }
 
+            DialogRow {
+                label: I18n.t("captions.cadence");
+                SegmentedControl {
+                    options: [
+                        I18n.t("captions.cadencePhrase"),
+                        I18n.t("captions.cadenceLine"),
+                        I18n.t("captions.cadenceWord"),
+                    ];
+                    current: root.data.cadence;
+                    changed(index) => { root.cadence-changed(index); }
+                }
+            }
+
             Text {
                 text: root.from-voice
-                    ? I18n.t("captions.oneTitlePerPhrase")
-                    : I18n.t("captions.oneTitlePerSentence");
+                    ? (root.data.cadence == 2
+                        ? I18n.t("captions.cadenceHintWord")
+                        : root.data.cadence == 1
+                            ? I18n.t("captions.cadenceHintLine")
+                            : I18n.t("captions.oneTitlePerPhrase"))
+                    : (root.data.cadence == 2
+                        ? I18n.t("captions.cadenceHintWordScript")
+                        : root.data.cadence == 1
+                            ? I18n.t("captions.cadenceHintLineScript")
+                            : I18n.t("captions.oneTitlePerSentence"));
                 color: Theme.fg-dim;
                 font-size: Theme.fs-sm;
                 wrap: word-wrap;

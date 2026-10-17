@@ -75,15 +75,15 @@ fn main() {
         let icon = "../../../assets/icons/concat.ico";
         println!("cargo:rerun-if-changed={icon}");
         // The file's name and description as Windows shows them in its
-        // properties, and as code signing checks them: "Concat" in every
-        // build, where the default would be the crate's lower-case name.
+        // properties. This fork ships as Botsivo Video; crate names still
+        // say concat-* as technical inheritance from upstream.
         winresource::WindowsResource::new()
             .set_icon(icon)
-            .set("ProductName", "Concat")
-            .set("FileDescription", "Concat")
+            .set("ProductName", "Botsivo Video")
+            .set("FileDescription", "Botsivo Video")
             .set(
                 "LegalCopyright",
-                "Copyright 2026 Jareer and Concat contributors, AGPL-3.0-or-later",
+                "Copyright 2026 Botsivo and contributors; based on Concat (AGPL-3.0-or-later)",
             )
             .compile()
             .expect("could not embed the Windows icon");

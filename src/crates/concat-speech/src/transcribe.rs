@@ -406,6 +406,12 @@ impl Transcriber {
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
         params.set_suppress_blank(true);
+        // Prefer breaks between words over mid-token cuts, and keep spoken
+        // phrases short enough that CapCut-style line/word packing has clean
+        // edges to work from (Premiere Auto Transcribe seeks the same).
+        params.set_token_timestamps(true);
+        params.set_split_on_word(true);
+        params.set_max_len(48);
         // The raw hooks, not `set_abort_callback_safe`. whisper-rs 0.16's
         // safe one hands whisper a pointer to a boxed trait object with a
         // trampoline typed for the closure itself, so whisper reads the

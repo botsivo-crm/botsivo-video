@@ -54,6 +54,8 @@ pub enum CaptionsMsg {
     ModelChanged(i32),
     PlacementChanged(i32),
     SizeChanged(i32),
+    /// CapCut-style cadence: phrase, short line, or one word at a time.
+    CadenceChanged(i32),
     /// Run the pass the sheet describes.
     Begin,
     Cancel,
@@ -71,6 +73,8 @@ struct Subject {
     speed: f64,
     /// The look chosen when the run began.
     look: (f64, f64),
+    /// Phrase / line / word packing chosen when the run began.
+    cadence: usize,
     /// The transcriber model, and the thirty-second windows whisper reads
     /// the sound in: what the run's timing is kept by.
     model: String,
@@ -101,6 +105,8 @@ pub struct CaptionsPane {
     pub placement: usize,
     /// 0 small, 1 medium, 2 large.
     pub size: usize,
+    /// 0 phrase (Whisper segments), 1 short line (~4 words), 2 one word.
+    pub cadence: usize,
     pub running: bool,
     /// How far the running transcription looks.
     pub pace: Pace,
@@ -151,6 +157,9 @@ impl CaptionsPane {
                 self.placement = (index.max(0) as usize).min(2);
             }
             CaptionsMsg::SizeChanged(index) => self.size = (index.max(0) as usize).min(2),
+            CaptionsMsg::CadenceChanged(index) => {
+                self.cadence = (index.max(0) as usize).min(2);
+            }
             CaptionsMsg::Begin => {
                 if self.from_voice {
                     self.run_sound(studio);
@@ -178,7 +187,7 @@ impl CaptionsPane {
                         };
                         let look = subject.look;
                         let base = studio.prefs.title_style.clone();
-                        let commands: Vec<Command> = segments
+                        let commands: Vec<Command> = expand_segments(segments, subject.cadence)
                             .into_iter()
                             .filter_map(|segment| {
                                 let text = segment.text.trim().to_owned();
@@ -186,7 +195,7 @@ impl CaptionsPane {
                                     caption_clip(
                                         text,
                                         subject.start + segment.start / subject.speed,
-                                        ((segment.end - segment.start) / subject.speed).max(0.2),
+                                        ((segment.end - segment.start) / subject.speed).max(0.12),
                                         look,
                                         base.as_ref(),
                                     )
@@ -232,6 +241,9 @@ impl CaptionsPane {
             model,
             placement: 0,
             size: 1,
+            // Short line is the CapCut / Shorts default; phrase stays for
+            // broadcast-style captions, word for karaoke-style punch-ins.
+            cadence: 1,
             timings: std::mem::take(&mut self.timings),
             ..CaptionsPane::default()
         };
@@ -247,7 +259,7 @@ impl CaptionsPane {
 
     /// The script as titles, one after another from the playhead.
     fn run_script(&mut self, studio: &mut Studio) {
-        let lines = script_captions(&self.text);
+        let lines = script_captions(&self.text, self.cadence);
         if lines.is_empty() {
             self.message = t("captions.nothingToCaptionYet");
             return;
@@ -320,6 +332,7 @@ impl CaptionsPane {
             start: clip.start,
             speed: clip.speed,
             look: self.look(),
+            cadence: self.cadence.min(2),
             model,
             windows,
         });
@@ -363,6 +376,7 @@ impl CaptionsPane {
             model: self.model as i32,
             placement: self.placement as i32,
             size: self.size as i32,
+            cadence: self.cadence as i32,
             running: self.running,
             progress: self.pace.floor,
             ceiling: self.pace.ceiling,
@@ -468,21 +482,106 @@ fn caption_clip(
 /// of broadcast subtitle hold, and what a reader takes in at a glance.
 const CAPTION_CHARS: usize = 42;
 
+/// Words packed into one on-screen caption in "line" cadence — CapCut's
+/// short-form default: readable at a glance without covering the frame.
+const LINE_WORDS: usize = 4;
+
+/// Whisper phrases cut into CapCut-style chunks. Phrase keeps the segments
+/// as spoken; line packs ~4 words; word puts one word per title, with time
+/// split by character weight so longer words hold the screen longer.
+fn expand_segments(segments: Vec<Segment>, cadence: usize) -> Vec<Segment> {
+    let max_words = match cadence {
+        1 => LINE_WORDS,
+        2 => 1,
+        _ => return segments,
+    };
+    segments
+        .into_iter()
+        .flat_map(|segment| chunk_timed_words(&segment.text, segment.start, segment.end, max_words))
+        .collect()
+}
+
+/// Split `text` across `[start, end]` into chunks of at most `max_words`,
+/// timing each chunk in proportion to its character weight.
+fn chunk_timed_words(text: &str, start: f64, end: f64, max_words: usize) -> Vec<Segment> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let duration = (end - start).max(0.05);
+    let weights: Vec<usize> = words
+        .iter()
+        .map(|word| word.chars().count().max(1))
+        .collect();
+    let total_weight: usize = weights.iter().sum();
+    let mut out = Vec::new();
+    let mut cursor = start;
+    let mut index = 0;
+    while index < words.len() {
+        let take = (words.len() - index).min(max_words.max(1));
+        let chunk_words = &words[index..index + take];
+        let chunk_weight: usize = weights[index..index + take].iter().sum();
+        index += take;
+        let last = index >= words.len();
+        let span = if last {
+            end - cursor
+        } else {
+            duration * (chunk_weight as f64 / total_weight as f64)
+        };
+        let chunk_end = if last {
+            end
+        } else {
+            (cursor + span).min(end)
+        };
+        out.push(Segment {
+            start: cursor,
+            end: chunk_end.max(cursor + 0.05),
+            text: chunk_words.join(" "),
+        });
+        cursor = chunk_end;
+    }
+    out
+}
+
 /// A script as caption lines, each with how long it stays up: a line's
-/// reading time at [`CHARS_PER_SECOND`], held to one second at least so
-/// a short word is not a flicker, and seven at most so a long line does
-/// not hang. A line break in the script is a break the author asked for;
-/// within a paragraph a sentence is a caption, and a long sentence wraps
-/// at its words.
-fn script_captions(text: &str) -> Vec<(String, f64)> {
+/// reading time at [`CHARS_PER_SECOND`], held to a floor so a short word
+/// is not a flicker, and a ceiling so a long line does not hang. Cadence
+/// mirrors the voice path: phrase wraps at broadcast length, line packs
+/// ~4 words, word is one word at a time.
+fn script_captions(text: &str, cadence: usize) -> Vec<(String, f64)> {
+    let max_words = match cadence {
+        1 => Some(LINE_WORDS),
+        2 => Some(1),
+        _ => None,
+    };
+    let (min_hold, max_hold) = match cadence {
+        2 => (0.35, 2.5),
+        1 => (0.55, 4.0),
+        _ => (1.0, 7.0),
+    };
     text.lines()
         .flat_map(sentences)
-        .flat_map(|sentence| wrap_caption(&sentence))
+        .flat_map(|sentence| match max_words {
+            Some(n) => chunk_script_words(&sentence, n),
+            None => wrap_caption(&sentence),
+        })
         .map(|line| {
             let seconds =
-                (line.chars().count() as f64 / f64::from(CHARS_PER_SECOND)).clamp(1.0, 7.0);
+                (line.chars().count() as f64 / f64::from(CHARS_PER_SECOND)).clamp(min_hold, max_hold);
             (line, seconds)
         })
+        .collect()
+}
+
+/// Pack a sentence into groups of at most `max_words` words.
+fn chunk_script_words(sentence: &str, max_words: usize) -> Vec<String> {
+    let words: Vec<&str> = sentence.split_whitespace().collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    words
+        .chunks(max_words.max(1))
+        .map(|chunk| chunk.join(" "))
         .collect()
 }
 
@@ -555,7 +654,8 @@ fn wrap_caption(sentence: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{script_captions, source_label};
+    use super::{chunk_timed_words, expand_segments, script_captions, source_label};
+    use concat_speech::transcribe::Segment;
 
     /// A clip in the voice list is its file and where it starts, in
     /// minutes and seconds, with hours once there are any.
@@ -575,6 +675,7 @@ mod tests {
         let lines = script_captions(
             "Hello there. This is version 3.5, mind!\n\nA sentence that runs on for far \
              longer than a caption line has any business running on for. Ok?",
+            0,
         );
         let text: Vec<&str> = lines.iter().map(|(line, _)| line.as_str()).collect();
         assert_eq!(
@@ -595,7 +696,47 @@ mod tests {
         );
         assert_eq!(lines[0].1, 1.0);
         assert!(lines[2].1 > lines[0].1);
-        assert!(script_captions("  \n ").is_empty());
-        assert_eq!(script_captions("你好。再见！").len(), 2);
+        assert!(script_captions("  \n ", 0).is_empty());
+        assert_eq!(script_captions("你好。再见！", 0).len(), 2);
+    }
+
+    /// Word cadence puts one spoken word on screen at a time, covering the
+    /// whole phrase window without gaps or overlaps.
+    #[test]
+    fn word_cadence_splits_a_phrase_across_its_window() {
+        let parts = chunk_timed_words("one two three", 1.0, 4.0, 1);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].text, "one");
+        assert_eq!(parts[1].text, "two");
+        assert_eq!(parts[2].text, "three");
+        assert!((parts[0].start - 1.0).abs() < 1e-9);
+        assert!((parts[2].end - 4.0).abs() < 1e-9);
+        assert!((parts[0].end - parts[1].start).abs() < 1e-9);
+        assert!((parts[1].end - parts[2].start).abs() < 1e-9);
+    }
+
+    /// Line cadence packs a few words; phrase cadence leaves Whisper alone.
+    #[test]
+    fn cadence_modes_pack_or_keep_whisper_phrases() {
+        let spoken = vec![Segment {
+            start: 0.0,
+            end: 2.0,
+            text: "hello from the timeline today".into(),
+        }];
+        assert_eq!(expand_segments(spoken.clone(), 0).len(), 1);
+        let lines = expand_segments(spoken.clone(), 1);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "hello from the timeline");
+        assert_eq!(lines[1].text, "today");
+        assert_eq!(expand_segments(spoken, 2).len(), 5);
+    }
+
+    /// Script word cadence yields one-word titles at a short hold.
+    #[test]
+    fn a_script_can_be_cut_word_by_word() {
+        let lines = script_captions("Hello there friend.", 2);
+        let text: Vec<&str> = lines.iter().map(|(line, _)| line.as_str()).collect();
+        assert_eq!(text, ["Hello", "there", "friend."]);
+        assert!(lines.iter().all(|(_, seconds)| *seconds >= 0.35));
     }
 }
